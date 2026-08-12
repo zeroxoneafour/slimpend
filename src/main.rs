@@ -90,8 +90,9 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
         }
         // wait a second to let hid create shi
         tokio::time::sleep(Duration::from_millis(100)).await;
-        println!("Slim pen 2 connected!");
         let hid_dev = hid_connect()?;
+        println!("Slim pen 2 connected!");
+        buzz(&hid_dev, 127, Waveform::LongDoubleBuzz)?;
         tokio::select!(
             v = main_loop(&hid_dev, &cli) => { v? },
             v = monitor_disconnected(&bt_device) => { v? },
