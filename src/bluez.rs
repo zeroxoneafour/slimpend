@@ -1,17 +1,17 @@
 use bluer::{Device, Error};
 use tokio_stream::StreamExt;
 
-pub async fn find_slim_pen_bt() -> Result<Option<Device>, Error> {
+pub async fn find_slim_pen_bt(target_alias: &str) -> Result<Option<Device>, Error> {
     let session = bluer::Session::new().await?;
     let adapter = session.default_adapter().await?;
     for addr in adapter.device_addresses().await? {
         let Ok(device) = adapter.device(addr) else {
             continue;
         };
-        let Ok(Some(device_name)) = device.name().await else {
+        let Ok(device_alias) = device.alias().await else {
             continue;
         };
-        if device_name == "Surface Slim Pen 2" {
+        if device_alias == target_alias {
             return Ok(Some(device));
         }
     }

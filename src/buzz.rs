@@ -1,9 +1,8 @@
+use hidapi::{HidApi, HidDevice};
 use std::{error::Error, fmt};
 
-use hidapi::{HidApi, HidDevice};
-
 #[derive(Debug)]
-enum BuzzError {
+pub enum BuzzError {
     DeviceNotFound,
     InvalidWaveform,
 }
@@ -26,14 +25,38 @@ impl fmt::Display for BuzzError {
 impl Error for BuzzError {}
 
 /*
- * Values 3-8 appear to be buzzes (in increasing duration)
- * Values 17-22 appear to be taps
+ * Values 3-6 appear to be buzzes (in decreasing duration)
+ * Values 7/8 appear to be double buzzes
+ * Value 17 is a very long double buzz
+ * Values 18-22 are shorter double buzzes (similar to first double buzz)
  * Value 0 is buzz as well, but is highly inconsistent.
  */
 #[repr(u8)]
 pub enum Waveform {
     Buzz(u8),
-    Tap(u8),
+    DoubleBuzz(u8),
+    LongDoubleBuzz,
+}
+
+impl TryFrom<Waveform> for u8 {
+    type Error = BuzzError;
+    fn try_from(value: Waveform) -> Result<u8, BuzzError> {
+        match value {
+            Waveform::Buzz(n) => {
+                if n > 3 {
+                    return Err(BuzzError::InvalidWaveform);
+                }
+                Ok(n + 3)
+            }
+            Waveform::DoubleBuzz(n) => {
+                if n > 6 {
+                    return Err(BuzzError::InvalidWaveform);
+                }
+                if n < 2 { Ok(n + 7) } else { Ok(n + 16) }
+            }
+            Waveform::LongDoubleBuzz => Ok(17),
+        }
+    }
 }
 
 pub fn hid_connect() -> Result<HidDevice, Box<dyn Error>> {
@@ -50,23 +73,9 @@ pub fn hid_connect() -> Result<HidDevice, Box<dyn Error>> {
 }
 
 pub fn buzz(dev: &HidDevice, intensity: u8, waveform: Waveform) -> Result<(), Box<dyn Error>> {
-    let wf = match waveform {
-        Waveform::Buzz(n) => {
-            if n > 5 {
-                return Err(Box::new(BuzzError::InvalidWaveform));
-            }
-            n + 3
-        }
-        Waveform::Tap(n) => {
-            if n > 5 {
-                return Err(Box::new(BuzzError::InvalidWaveform));
-            }
-            n + 17
-        }
-    };
     // https://github.com/linux-surface/linux-surface/issues/1066
     // [65, (repeat), (intensity), (waveform), (cutoff), (major byte of retrigger interval), (minor byte of retrigger interval)]
     // not really known what anything after waveform does so we js dont send it
-    let _ = dev.write(&[65, 1, intensity, wf])?;
+    let _ = dev.write(&[65, 1, intensity, waveform.try_into()?])?;
     Ok(())
 }
