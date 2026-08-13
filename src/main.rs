@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use crate::{
@@ -18,7 +18,7 @@ mod evdev;
 #[derive(Parser)]
 struct Cli {
     #[arg(
-        short = 'a',
+        short = 'n',
         long,
         help = "Pen bluetooth name/alias",
         default_value_t = String::from("Surface Slim Pen 2"),
@@ -26,14 +26,13 @@ struct Cli {
     )]
     pen_alias: String,
     #[arg(
-        value_enum,
         short,
         long,
-        help = "Waveform",
-        default_value_t = Waveform::default(),
+        help = "Waveform to use. Values can be integers 0-3 inclusive",
+        default_value_t = 0u8,
         global = true
     )]
-    waveform: Waveform,
+    waveform: u8,
     #[arg(
         short,
         long,
@@ -42,6 +41,7 @@ struct Cli {
         global = true
     )]
     intensity: f64,
+    /*
     #[arg(
         short,
         long,
@@ -50,15 +50,38 @@ struct Cli {
         global = true
     )]
     keep_alive: bool,
+    */
     #[arg(
-        long,
-        alias = "ps",
-        help = "Use square root curve for pressure sensitivity. Alias: --ps",
+        short,
+        long = "pressure",
+        help = "Nth root to apply to pressure multiplier",
+        default_value_t = 1.0,
         global = true
     )]
-    pressure_sqrt: bool,
+    pressure_root: f64,
+    #[arg(
+        short,
+        long = "distance",
+        help = "Nth root to apply to distance multiplier",
+        default_value_t = 3.0,
+        global = true
+    )]
+    distance_root: f64,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+impl TryFrom<u8> for Waveform {
+    type Error = BuzzError;
+    fn try_from(value: u8) -> Result<Self, BuzzError> {
+        match value {
+            0 => Ok(Waveform::Click),
+            1 => Ok(Waveform::Release),
+            2 => Ok(Waveform::Press),
+            3 => Ok(Waveform::Hover),
+            _ => Err(BuzzError::InvalidWaveform),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -76,7 +99,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match &cli.command {
         Some(Commands::Buzz) => {
             let dev = BuzzDevice::new(None)?;
-            println!("buzzing on waveform {}", cli.waveform as u8);
             let res = tokio::select! { v = buzz(&dev, cli.waveform) => v, _ = tokio::signal::ctrl_c() => Ok(()) };
             println!("Sending stop waveform");
             dev.buzz(0, Waveform::Stop)?;
@@ -90,7 +112,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn buzz(dev: &BuzzDevice, waveform: Waveform) -> Result<(), Box<dyn Error>> {
+async fn buzz(dev: &BuzzDevice, waveform_option: u8) -> Result<(), Box<dyn Error>> {
+    let waveform: Waveform = waveform_option.try_into()?;
+    println!("buzzing on waveform 0x{:x}", waveform as u16);
     loop {
         tokio::time::sleep(dev.buzz(255, waveform)?).await;
     }
@@ -110,7 +134,7 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
         let mut conn_tries = 1;
         let try_connect_res = loop {
             let Ok(Some(ret)) = try_connect_hid(&addr) else {
-                if conn_tries > 100 {
+                if conn_tries > 5 {
                     break None;
                 }
                 conn_tries += 1;
@@ -120,28 +144,28 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
             break Some(ret);
         };
         let Some((buzz_dev, ev_dev)) = try_connect_res else {
-            println!(
-                "Failed to connect to Slim Pen 2 (addr {}) after 100 tries",
-                addr
-            );
-            println!("Make sure you are in input group and IPTSD is enabled");
-            break Err(Box::new(BuzzError::DeviceNotFound));
+            println!("Failed to connect to Slim Pen 2 ({}) after 5 tries", addr);
+            println!("Waiting for 1 seconds");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
         };
         println!(
-            "Slim Pen 2 (addr {}) connected! (Took {} tries)",
+            "Slim Pen 2 ({}) connected! (Took {} tries)",
             addr, conn_tries
         );
+        //buzz_dev.buzz_cont(255, Waveform::None)?;
+        buzz_dev.buzz(255, Waveform::Error)?;
         if let Err(e) = tokio::select!(
             v = main_loop(&cli, &buzz_dev, ev_dev) => { v },
             v = monitor_disconnected(&bt_device) => { match v {
                 Ok(_) => Ok(()),
                 Err(e) => Err(Box::new(e).into())
             } },
-            v = keep_device_alive(&bt_device, cli.keep_alive) => { v }
+            v = keep_device_alive(&buzz_dev, false) => { v }
         ) {
             println!("Ran into error - {}, restarting loop", e);
         } else {
-            println!("Slim Pen 2 (addr {}) disconnected!", addr);
+            println!("Slim Pen 2 ({}) disconnected!", addr);
         }
     }
 }
@@ -160,7 +184,26 @@ async fn main_loop(
     buzz_dev: &BuzzDevice,
     ev_dev: ::evdev::Device,
 ) -> Result<(), Box<dyn Error>> {
-    buzz_dev.buzz(255, Waveform::Error)?;
+    let mut x_res = 0;
+    let mut y_res = 0;
+    let mut pressure_res = 0.0;
+    for (axis_code, abs_info) in ev_dev.get_absinfo()? {
+        match axis_code {
+            AbsoluteAxisCode::ABS_X => {
+                x_res = abs_info.maximum() - abs_info.minimum();
+            }
+            AbsoluteAxisCode::ABS_Y => {
+                y_res = abs_info.maximum() - abs_info.minimum();
+            }
+            AbsoluteAxisCode::ABS_PRESSURE => {
+                pressure_res = (abs_info.maximum() - abs_info.minimum()) as f64;
+            }
+            _ => {}
+        }
+    }
+    let display_res = ((x_res.pow(2) + y_res.pow(2)) as f64).sqrt();
+
+    let waveform: Waveform = cli.waveform.try_into()?;
     let mut ev_stream = ev_dev.into_event_stream()?;
 
     let mut old_x = 0;
@@ -192,13 +235,10 @@ async fn main_loop(
                 KeyCode::BTN_TOUCH => {
                     btn_touch = !(value == 0);
                     if btn_touch {
-                        //buzz_dev.buzz(255, Waveform::PencilCont).await?;
                         btn_touch_justpressed = true;
                         // resync old_x and old_y on touch
                         old_x = x;
                         old_y = y;
-                    } else {
-                        //buzz_dev.buzz(255, Waveform::Stop).await?;
                     }
                 }
                 KeyCode::BTN_TOOL_RUBBER => {
@@ -218,46 +258,31 @@ async fn main_loop(
                     continue;
                 }
 
-                let delta_x = x - old_x;
-                old_x = x;
-                let delta_y = y - old_y;
-                old_y = y;
-
                 let mut vib = if btn_touch_justpressed {
                     btn_touch_justpressed = false;
                     // small buzz on pen touch
-                    96.0
+                    0.5
                 } else {
+                    let delta_x = x - old_x;
+                    let delta_y = y - old_y;
                     // apply a sqrt transform after dividing dist by 1024, then renormalize to 256
                     // this helps gain a bit of vib at lower velocities
-                    (((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / 1024.0).sqrt() * 256.0
+                    (((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res)
+                        .powf(1.0 / cli.distance_root)
                 };
 
-                if eraser {
-                    vib *= 0.25;
+                vib *= if eraser {
+                    0.4
                 } else {
-                    let mut pressure_coeff = pressure as f64 / 4096.0;
-                    if cli.pressure_sqrt {
-                        pressure_coeff = pressure_coeff.sqrt();
-                    }
-                    vib *= pressure_coeff;
-                }
+                    (pressure as f64 / pressure_res).powf(1.0 / cli.pressure_root)
+                };
 
                 vib *= cli.intensity;
 
-                if vib < 5.0 {
-                    continue;
-                }
+                buzz_duration = buzz_dev.buzz((vib * 256.0) as u8, waveform)?;
 
-                vib = vib.clamp(0.0, 255.0);
-
-                println!(
-                    "buzz {:?} {}",
-                    timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                    vib as u8
-                );
-                buzz_duration = buzz_dev.buzz(vib as u8, cli.waveform)?;
-
+                old_x = x;
+                old_y = y;
                 last_timestamp = timestamp;
             }
             _ => {}
@@ -266,21 +291,12 @@ async fn main_loop(
     Ok(())
 }
 
-// ping loop that reads all GATT descriptors to keep the connection alive
-// does not work right now
-async fn keep_device_alive(bt_dev: &bluer::Device, keep_alive: bool) -> Result<(), Box<dyn Error>> {
+// ping loop to keep the connection alive
+// does not work
+async fn keep_device_alive(buzz_dev: &BuzzDevice, keep_alive: bool) -> Result<(), Box<dyn Error>> {
     loop {
         if keep_alive {
-            let services = bt_dev.services().await?;
-            for service in services {
-                let characteristics = service.characteristics().await?;
-                for characteristic in characteristics {
-                    let descriptors = characteristic.descriptors().await?;
-                    for descriptor in descriptors {
-                        descriptor.read().await?;
-                    }
-                }
-            }
+            buzz_dev.dump_feature_reports();
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }

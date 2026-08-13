@@ -1,18 +1,21 @@
-use clap::ValueEnum;
 use hex_literal::hex;
 use hidapi::{HidApi, HidDevice};
-use std::{collections::HashMap, error::Error, fmt, time::Duration};
+use std::{collections::HashMap, error::Error, fmt, hash::Hash, time::Duration};
 
 #[derive(Debug)]
 pub enum BuzzError {
     DeviceNotFound,
+    InvalidWaveform,
 }
 
 impl fmt::Display for BuzzError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuzzError::DeviceNotFound => {
-                write!(f, "Surface Slim Pen 2 not found!")
+                write!(f, "Surface Slim Pen 2 not found")
+            }
+            BuzzError::InvalidWaveform => {
+                write!(f, "Waveform is invalid")
             }
         }
     }
@@ -28,42 +31,43 @@ impl Error for BuzzError {}
  * Values 18-22 are shorter double buzzes (similar to first double buzz)
  * Value 0 is buzz as well, but is highly inconsistent.
  */
-#[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum, Default, Hash)]
+#[repr(u16)]
+#[derive(Copy, Clone, Hash)]
+#[allow(dead_code)]
 pub enum Waveform {
     // 0x1001-0x1003
     // Required codes
-    None = 0x01,
-    Stop = 0x02,
-    Click = 0x03,
+    None = 0x1001,
+    Stop = 0x1002,
+    Click = 0x1003,
     // 0x1006 - 0x100A
     // Optional codes
-    Press = 0x04,
-    #[default]
-    Release = 0x05,
-    Hover = 0x06,
-    Success = 0x07,
-    Error = 0x08,
+    Press = 0x1006,
+    Release = 0x1007,
+    Hover = 0x1008,
+    Success = 0x1009,
+    Error = 0x100A,
     // 0x100B - 0x1011
     // "Continuous" (not working on linux)
-    InkCont = 0x09,
-    PencilCont = 0x0a,
-    MarkerCont = 0x0b,
-    ChiselMarkerCont = 0x0c,
-    BrushCont = 0x0d,
-    EraserCont = 0x0e,
-    SparkleCont = 0x0f,
+    InkCont = 0x100B,
+    PencilCont = 0x100C,
+    MarkerCont = 0x100D,
+    ChiselMarkerCont = 0x100E,
+    BrushCont = 0x100F,
+    EraserCont = 0x1010,
+    SparkleCont = 0x1011,
     // 0x1012-0x1015
     // Interrupting (no duration)
-    Collide = 0x11,
-    Align = 0x12,
-    Step = 0x13,
-    Grow = 0x14,
+    Collide = 0x1012,
+    Align = 0x1013,
+    Step = 0x1014,
+    Grow = 0x1015,
 }
 
 pub struct BuzzDevice {
     hid_device: HidDevice,
-    durations: HashMap<u8, u16>,
+    ordinals: HashMap<u16, u8>,
+    durations: HashMap<u16, u16>,
 }
 
 impl BuzzDevice {
@@ -89,39 +93,77 @@ impl BuzzDevice {
             .collect();
         let (durations_nums, waveform_ids) = waveforms.split_at(waveforms.len() / 2);
         let mut durations = HashMap::new();
-        for i in 0..durations_nums.len() {
-            if waveform_ids[i] < 0x1003 {
+        let mut ordinals = HashMap::new();
+        // first num in array is guaranteed to be duration for click,
+        // and will also establish the base ordinal (in this case 3)
+        // so the ordinal for waveform_ids[1] is 4, etc.
+        // the ordinal is passed instead of the waveform id in calls to buzz
+        let ordinal_base = waveform_ids[0] as u8;
+        ordinals.insert(0x1001, 1);
+        ordinals.insert(0x1002, 2);
+        ordinals.insert(0x1003, ordinal_base);
+        durations.insert(0x1003, durations_nums[0]);
+        for i in 1..durations_nums.len() {
+            let wf_id = waveform_ids[i];
+            if wf_id < 0x1003 {
                 continue;
             }
-            durations.insert((waveform_ids[i] - 0x1003) as u8, durations_nums[i]);
+            ordinals.insert(wf_id, i as u8 + ordinal_base);
+            durations.insert(wf_id, durations_nums[i]);
         }
-        println!("waveform durations - {:?}", durations);
 
         //initialize_device(&hid_device)?;
 
         Ok(BuzzDevice {
             hid_device,
+            ordinals,
             durations,
         })
     }
 
     // returns the amount of time to wait for
     pub fn buzz(&self, intensity: u8, waveform: Waveform) -> Result<Duration, Box<dyn Error>> {
+        let wf_u16 = waveform as u16;
+        let ordinal = self.ordinals.get(&wf_u16).ok_or("Failed to get ordinal")?;
         // https://github.com/linux-surface/linux-surface/issues/1066
         // [65, (repeat), (intensity), (waveform), (cutoff), (major byte of retrigger interval), (minor byte of retrigger interval)]
         // not really known what anything after waveform does so we js dont send it
         let _ = self
             .hid_device
-            .write(&[65, 0, intensity, waveform as u8, 0, 0, 0])?;
-        if let Some(duration) = self.durations.get(&(waveform as u8)) {
+            .write(&[65, 1, intensity, *ordinal, 0, 0, 0])?;
+        if let Some(duration) = self.durations.get(&wf_u16) {
             Ok(Duration::from_millis(*duration as u64))
         } else {
             Ok(Duration::from_millis(20))
         }
     }
+
+    // not working right now
+    #[allow(dead_code)]
+    pub fn buzz_cont(&self, intensity: u8, waveform: Waveform) -> Result<(), Box<dyn Error>> {
+        let wf_u16 = waveform as u16;
+        let ordinal = self.ordinals.get(&wf_u16).ok_or("Failed to get ordinal")?;
+        self.hid_device
+            .send_feature_report(&[65, 0, intensity, *ordinal, 0xD0, 0x05])?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn dump_feature_reports(&self) -> Vec<Vec<u8>> {
+        let mut ret = Vec::new();
+        let mut buf = [0u8; 256];
+        for i in 0u8..255 {
+            buf[0] = i;
+            if let Ok(len) = self.hid_device.get_feature_report(&mut buf) {
+                ret.push(buf[0..len + 1].to_vec());
+            }
+        }
+        ret
+    }
 }
 
-pub fn initialize_device(dev: &HidDevice) -> Result<(), Box<dyn Error>> {
+#[allow(dead_code)]
+fn initialize_device(dev: &HidDevice) -> Result<(), Box<dyn Error>> {
     let mut chars = [0u8; 61];
     chars[0] = 42;
     let hex_writes = [
