@@ -1,17 +1,15 @@
 use std::{
     error::Error,
-    thread::sleep,
     time::{Duration, SystemTime},
 };
 
 use crate::{
     bluez::{find_slim_pen_bt, monitor_connected, monitor_disconnected},
-    buzz::{BuzzError, Waveform, buzz, hid_connect},
+    buzz::{BuzzDevice, BuzzError, Waveform},
     evdev::open_evdev,
 };
 use ::evdev::{AbsoluteAxisCode, EventSummary, KeyCode};
 use clap::{Parser, Subcommand};
-use hidapi::HidDevice;
 
 mod bluez;
 mod buzz;
@@ -28,13 +26,14 @@ struct Cli {
     )]
     pen_alias: String,
     #[arg(
+        value_enum,
         short,
         long,
-        help = "Waveform (between 0 and 3 inclusive)",
-        default_value_t = 2,
+        help = "Waveform",
+        default_value_t = Waveform::default(),
         global = true
     )]
-    waveform: u8,
+    waveform: Waveform,
     #[arg(
         short,
         long,
@@ -76,20 +75,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match &cli.command {
         Some(Commands::Buzz) => {
-            let dev = hid_connect(None)?;
-            for wf in 0u8..4 {
-                println!("testing buzz waveform {}", wf);
-                buzz(&dev, 255, Waveform::Buzz(wf))?;
-                sleep(Duration::from_millis(500));
+            let dev = BuzzDevice::new(None)?;
+            for waveform in Waveform::all() {
+                println!("testing waveform {}", waveform as u8);
+                dev.buzz(255, waveform)?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            for wf in 0u8..7 {
-                println!("testing double buzz waveform {}", wf);
-                buzz(&dev, 255, Waveform::DoubleBuzz(wf))?;
-                sleep(Duration::from_millis(500));
-            }
-            println!("testing long double buzz waveform");
-            buzz(&dev, 255, Waveform::LongDoubleBuzz)?;
-            sleep(Duration::from_millis(500));
             Ok(())
         }
         Some(Commands::Serve) => server(&cli).await,
@@ -123,7 +114,7 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
             };
             break Some(ret);
         };
-        let Some((hid_dev, ev_dev)) = try_connect_res else {
+        let Some((buzz_dev, ev_dev)) = try_connect_res else {
             println!(
                 "Failed to connect to Slim Pen 2 (addr {}) after 100 tries",
                 addr
@@ -136,7 +127,7 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
             addr, conn_tries
         );
         if let Err(e) = tokio::select!(
-            v = main_loop(&cli, &hid_dev, ev_dev) => { v },
+            v = main_loop(&cli, &buzz_dev, ev_dev) => { v },
             v = monitor_disconnected(&bt_device) => { match v {
                 Ok(_) => Ok(()),
                 Err(e) => Err(Box::new(e).into())
@@ -150,21 +141,21 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn try_connect_hid(addr: &str) -> Result<Option<(HidDevice, ::evdev::Device)>, Box<dyn Error>> {
-    let hid_dev = hid_connect(Some(&addr))?;
+fn try_connect_hid(addr: &str) -> Result<Option<(BuzzDevice, ::evdev::Device)>, Box<dyn Error>> {
+    let buzz_dev = BuzzDevice::new(Some(&addr))?;
     let Some(ev_dev) = open_evdev() else {
         println!("No evdev device found matching \"IPTS Virtual Stylus\"");
         return Ok(None);
     };
-    return Ok(Some((hid_dev, ev_dev)));
+    return Ok(Some((buzz_dev, ev_dev)));
 }
 
 async fn main_loop(
     cli: &Cli,
-    hid_dev: &HidDevice,
+    buzz_dev: &BuzzDevice,
     ev_dev: ::evdev::Device,
 ) -> Result<(), Box<dyn Error>> {
-    buzz(&hid_dev, 127, Waveform::LongDoubleBuzz)?;
+    buzz_dev.buzz(255, Waveform::Error)?;
     let mut ev_stream = ev_dev.into_event_stream()?;
 
     let mut old_x = 0;
@@ -176,6 +167,7 @@ async fn main_loop(
     let mut btn_touch_justpressed = false;
     let mut pressure = 0;
     let mut last_timestamp = SystemTime::now();
+    let mut buzz_duration = Duration::from_millis(0);
 
     while let Ok(ev) = ev_stream.next_event().await {
         match ev.destructure() {
@@ -195,10 +187,13 @@ async fn main_loop(
                 KeyCode::BTN_TOUCH => {
                     btn_touch = !(value == 0);
                     if btn_touch {
+                        //buzz_dev.buzz(255, Waveform::PencilCont).await?;
                         btn_touch_justpressed = true;
                         // resync old_x and old_y on touch
                         old_x = x;
                         old_y = y;
+                    } else {
+                        //buzz_dev.buzz(255, Waveform::Stop).await?;
                     }
                 }
                 KeyCode::BTN_TOOL_RUBBER => {
@@ -215,7 +210,7 @@ async fn main_loop(
                 // 20 ms is sufficient time for buzz(0-3) to complete
                 // adding more buzzes before this time causes a backlog
                 // leading to buzzing after picking up pen
-                if timestamp.duration_since(last_timestamp)? < Duration::from_millis(20) {
+                if timestamp.duration_since(last_timestamp)? < buzz_duration {
                     continue;
                 }
 
@@ -252,7 +247,7 @@ async fn main_loop(
 
                 vib = vib.clamp(0.0, 255.0);
 
-                buzz(&hid_dev, vib as u8, Waveform::Buzz(cli.waveform))?;
+                buzz_duration = buzz_dev.buzz(vib as u8, Waveform::Release)?;
 
                 last_timestamp = timestamp;
             }
