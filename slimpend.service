@@ -1,0 +1,10 @@
+[Unit]
+Description=slimpend daemon
+After=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/home/vaughanm/.cargo/bin/slimpend
+
+[Install]
+WantedBy=default.target

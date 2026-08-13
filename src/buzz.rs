@@ -59,13 +59,13 @@ impl TryFrom<Waveform> for u8 {
     }
 }
 
-pub fn hid_connect() -> Result<HidDevice, Box<dyn Error>> {
+pub fn hid_connect(addr: Option<&str>) -> Result<HidDevice, Box<dyn Error>> {
     let api = HidApi::new()?;
-
-    let Some(dev_info) = api
-        .device_list()
-        .find(|d| d.vendor_id() == 0x045e && d.product_id() == 0x0c0f)
-    else {
+    let Some(dev_info) = api.device_list().find(|d| {
+        d.vendor_id() == 0x045e
+            && d.product_id() == 0x0c0f
+            && (addr == None || d.serial_number() == addr)
+    }) else {
         return Err(Box::new(BuzzError::DeviceNotFound));
     };
     let dev = dev_info.open_device(&api)?;

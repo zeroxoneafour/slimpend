@@ -11,7 +11,6 @@ use crate::{
 };
 use ::evdev::{AbsoluteAxisCode, EventSummary, KeyCode};
 use clap::{Parser, Subcommand};
-use hidapi::HidDevice;
 
 mod bluez;
 mod buzz;
@@ -37,6 +36,12 @@ struct Cli {
         default_value_t = false
     )]
     keep_alive: bool,
+    #[arg(
+        long,
+        alias = "ps",
+        help = "Use square root curve for pressure sensitivity. Alias: --ps"
+    )]
+    pressure_sqrt: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -55,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match &cli.command {
         Some(Commands::Buzz) => {
-            let dev = hid_connect()?;
+            let dev = hid_connect(None)?;
             for wf in 0u8..4 {
                 println!("testing buzz waveform {}", wf);
                 buzz(&dev, 255, Waveform::Buzz(wf))?;
@@ -88,21 +93,27 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
         if !bt_device.is_connected().await? {
             monitor_connected(&bt_device).await?;
         }
-        // wait a second to let hid create shi
+        let addr = bt_device.address().to_string().to_ascii_lowercase();
+        println!("Slim Pen 2 (addr {}) connected!", addr);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let hid_dev = hid_connect()?;
-        println!("Slim pen 2 connected!");
-        buzz(&hid_dev, 127, Waveform::LongDoubleBuzz)?;
-        tokio::select!(
-            v = main_loop(&hid_dev, &cli) => { v? },
-            v = monitor_disconnected(&bt_device) => { v? },
-            v = keep_device_alive(&bt_device, cli.keep_alive) => { v? }
-        );
-        println!("Slim pen 2 disconnected!");
+        if let Err(e) = tokio::select!(
+            v = main_loop(&cli, &addr) => { v },
+            v = monitor_disconnected(&bt_device) => { match v {
+                Ok(_) => Ok(()),
+                Err(e) => Err(Box::new(e).into())
+            } },
+            v = keep_device_alive(&bt_device, cli.keep_alive) => { v }
+        ) {
+            println!("Ran into error - {}, restarting loop", e);
+        } else {
+            println!("Slim Pen 2 (addr {}) disconnected!", addr);
+        }
     }
 }
 
-async fn main_loop(hid_dev: &HidDevice, cli: &Cli) -> Result<(), Box<dyn Error>> {
+async fn main_loop(cli: &Cli, serial_number: &str) -> Result<(), Box<dyn Error>> {
+    let hid_dev = hid_connect(Some(serial_number))?;
+    buzz(&hid_dev, 127, Waveform::LongDoubleBuzz)?;
     let Some(ev_device) = open_evdev() else {
         println!("No evdev device found matching \"IPTS Virtual Stylus\"");
         return Ok(());
@@ -114,6 +125,7 @@ async fn main_loop(hid_dev: &HidDevice, cli: &Cli) -> Result<(), Box<dyn Error>>
     let mut x = 0;
     let mut y = 0;
     let mut btn_touch = false;
+    let mut eraser = false;
     let mut btn_touch_justpressed = false;
     let mut pressure = 0;
     let mut last_timestamp = SystemTime::now();
@@ -141,6 +153,9 @@ async fn main_loop(hid_dev: &HidDevice, cli: &Cli) -> Result<(), Box<dyn Error>>
                         old_x = x;
                         old_y = y;
                     }
+                }
+                KeyCode::BTN_TOOL_RUBBER => {
+                    eraser = !(value == 0);
                 }
                 _ => {}
             },
@@ -172,9 +187,15 @@ async fn main_loop(hid_dev: &HidDevice, cli: &Cli) -> Result<(), Box<dyn Error>>
                     (((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / 1024.0).sqrt() * 256.0
                 };
 
-                // use square root scaling for pressure as well (nvm no we dont)
-                let pressure_coeff = pressure as f64 / 4096.0;
-                vib *= pressure_coeff;
+                if eraser {
+                    vib *= 0.25;
+                } else {
+                    let mut pressure_coeff = pressure as f64 / 4096.0;
+                    if cli.pressure_sqrt {
+                        pressure_coeff = pressure_coeff.sqrt();
+                    }
+                    vib *= pressure_coeff;
+                }
 
                 vib *= cli.intensity;
 
@@ -184,7 +205,7 @@ async fn main_loop(hid_dev: &HidDevice, cli: &Cli) -> Result<(), Box<dyn Error>>
 
                 vib = vib.clamp(0.0, 255.0);
 
-                buzz(hid_dev, vib as u8, Waveform::Buzz(cli.waveform))?;
+                buzz(&hid_dev, vib as u8, Waveform::Buzz(cli.waveform))?;
 
                 last_timestamp = timestamp;
             }
