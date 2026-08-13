@@ -8,6 +8,12 @@ Automatically listens for connections up/down on bluetooth and starts haptic fee
 
 ## installation
 
+Prerequisites - 
+
+* IPTSD running
+* User is in `input` group (or at least has access to IPTSD input device)
+* **important** - Slim Pen 2 has been paired before
+
 1. `cargo install --path .`
 2. `cp slimpend.service ~/.config/systemd/user`
 3. `systemctl --user daemon-reload`

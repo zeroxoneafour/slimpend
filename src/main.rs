@@ -19,28 +19,43 @@ mod evdev;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(short = 'a', long, help = "Pen bluetooth name", default_value_t = String::from("Surface Slim Pen 2"))]
+    #[arg(
+        short = 'a',
+        long,
+        help = "Pen bluetooth name/alias",
+        default_value_t = String::from("Surface Slim Pen 2"),
+        global = true
+    )]
     pen_alias: String,
     #[arg(
         short,
         long,
         help = "Waveform (between 0 and 3 inclusive)",
-        default_value_t = 3
+        default_value_t = 2,
+        global = true
     )]
     waveform: u8,
-    #[arg(short, long, help = "Intensity multiplier", default_value_t = 1.0)]
+    #[arg(
+        short,
+        long,
+        help = "Intensity multiplier",
+        default_value_t = 1.0,
+        global = true
+    )]
     intensity: f64,
     #[arg(
         short,
         long,
         help = "Try to keep the pen connection alive (not working rn and causes lag)",
-        default_value_t = false
+        default_value_t = false,
+        global = true
     )]
     keep_alive: bool,
     #[arg(
         long,
         alias = "ps",
-        help = "Use square root curve for pressure sensitivity. Alias: --ps"
+        help = "Use square root curve for pressure sensitivity. Alias: --ps",
+        global = true
     )]
     pressure_sqrt: bool,
     #[command(subcommand)]
