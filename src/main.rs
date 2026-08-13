@@ -6,11 +6,12 @@ use std::{
 
 use crate::{
     bluez::{find_slim_pen_bt, monitor_connected, monitor_disconnected},
-    buzz::{Waveform, buzz, hid_connect},
+    buzz::{BuzzError, Waveform, buzz, hid_connect},
     evdev::open_evdev,
 };
 use ::evdev::{AbsoluteAxisCode, EventSummary, KeyCode};
 use clap::{Parser, Subcommand};
+use hidapi::HidDevice;
 
 mod bluez;
 mod buzz;
@@ -94,10 +95,33 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
             monitor_connected(&bt_device).await?;
         }
         let addr = bt_device.address().to_string().to_ascii_lowercase();
-        println!("Slim Pen 2 (addr {}) connected!", addr);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // sometimes takes many tries to connect
+        let mut conn_tries = 1;
+        let try_connect_res = loop {
+            let Ok(Some(ret)) = try_connect_hid(&addr) else {
+                if conn_tries > 100 {
+                    break None;
+                }
+                conn_tries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            };
+            break Some(ret);
+        };
+        let Some((hid_dev, ev_dev)) = try_connect_res else {
+            println!(
+                "Failed to connect to Slim Pen 2 (addr {}) after 100 tries",
+                addr
+            );
+            println!("Make sure you are in input group and IPTSD is enabled");
+            break Err(Box::new(BuzzError::DeviceNotFound));
+        };
+        println!(
+            "Slim Pen 2 (addr {}) connected! (Took {} tries)",
+            addr, conn_tries
+        );
         if let Err(e) = tokio::select!(
-            v = main_loop(&cli, &addr) => { v },
+            v = main_loop(&cli, &hid_dev, ev_dev) => { v },
             v = monitor_disconnected(&bt_device) => { match v {
                 Ok(_) => Ok(()),
                 Err(e) => Err(Box::new(e).into())
@@ -111,14 +135,22 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn main_loop(cli: &Cli, serial_number: &str) -> Result<(), Box<dyn Error>> {
-    let hid_dev = hid_connect(Some(serial_number))?;
-    buzz(&hid_dev, 127, Waveform::LongDoubleBuzz)?;
-    let Some(ev_device) = open_evdev() else {
+fn try_connect_hid(addr: &str) -> Result<Option<(HidDevice, ::evdev::Device)>, Box<dyn Error>> {
+    let hid_dev = hid_connect(Some(&addr))?;
+    let Some(ev_dev) = open_evdev() else {
         println!("No evdev device found matching \"IPTS Virtual Stylus\"");
-        return Ok(());
+        return Ok(None);
     };
-    let mut ev_stream = ev_device.into_event_stream()?;
+    return Ok(Some((hid_dev, ev_dev)));
+}
+
+async fn main_loop(
+    cli: &Cli,
+    hid_dev: &HidDevice,
+    ev_dev: ::evdev::Device,
+) -> Result<(), Box<dyn Error>> {
+    buzz(&hid_dev, 127, Waveform::LongDoubleBuzz)?;
+    let mut ev_stream = ev_dev.into_event_stream()?;
 
     let mut old_x = 0;
     let mut old_y = 0;

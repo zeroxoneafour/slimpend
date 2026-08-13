@@ -4,7 +4,7 @@ After=bluetooth.target
 
 [Service]
 Type=simple
-ExecStart=/home/vaughanm/.cargo/bin/slimpend
+ExecStart=/home/vaughanm/.cargo/bin/slimpend serve
 
 [Install]
 WantedBy=default.target
