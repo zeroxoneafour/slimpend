@@ -55,23 +55,10 @@ pub enum Waveform {
     SparkleCont = 0x0f,
     // 0x1012-0x1015
     // Interrupting (no duration)
-    Collide = 0x10,
-    Align = 0x11,
-    Step = 0x12,
-    Grow = 0x13,
-}
-
-impl Waveform {
-    pub fn all() -> [Waveform; 6] {
-        [
-            Waveform::Click,
-            Waveform::Press,
-            Waveform::Release,
-            Waveform::Hover,
-            Waveform::Success,
-            Waveform::Error,
-        ]
-    }
+    Collide = 0x11,
+    Align = 0x12,
+    Step = 0x13,
+    Grow = 0x14,
 }
 
 pub struct BuzzDevice {
@@ -129,7 +116,7 @@ impl BuzzDevice {
         if let Some(duration) = self.durations.get(&(waveform as u8)) {
             Ok(Duration::from_millis(*duration as u64))
         } else {
-            Ok(Duration::from_millis(0))
+            Ok(Duration::from_millis(20))
         }
     }
 }

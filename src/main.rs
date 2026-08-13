@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -76,18 +76,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match &cli.command {
         Some(Commands::Buzz) => {
             let dev = BuzzDevice::new(None)?;
-            for waveform in Waveform::all() {
-                println!("testing waveform {}", waveform as u8);
-                dev.buzz(255, waveform)?;
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Ok(())
+            println!("buzzing on waveform {}", cli.waveform as u8);
+            let res = tokio::select! { v = buzz(&dev, cli.waveform) => v, _ = tokio::signal::ctrl_c() => Ok(()) };
+            println!("Sending stop waveform");
+            dev.buzz(0, Waveform::Stop)?;
+            res
         }
         Some(Commands::Serve) => server(&cli).await,
         None => {
             println!("No command found, defaulting to server mode");
             server(&cli).await
         }
+    }
+}
+
+async fn buzz(dev: &BuzzDevice, waveform: Waveform) -> Result<(), Box<dyn Error>> {
+    loop {
+        tokio::time::sleep(dev.buzz(255, waveform)?).await;
     }
 }
 
@@ -202,15 +207,14 @@ async fn main_loop(
                 _ => {}
             },
             EventSummary::Synchronization(sync, _, _) => {
-                if !btn_touch {
+                let timestamp = sync.timestamp();
+                if let Ok(duration) = timestamp.duration_since(last_timestamp)
+                    && duration < buzz_duration
+                {
                     continue;
                 }
 
-                let timestamp = sync.timestamp();
-                // 20 ms is sufficient time for buzz(0-3) to complete
-                // adding more buzzes before this time causes a backlog
-                // leading to buzzing after picking up pen
-                if timestamp.duration_since(last_timestamp)? < buzz_duration {
+                if !btn_touch {
                     continue;
                 }
 
@@ -247,7 +251,12 @@ async fn main_loop(
 
                 vib = vib.clamp(0.0, 255.0);
 
-                buzz_duration = buzz_dev.buzz(vib as u8, Waveform::Release)?;
+                println!(
+                    "buzz {:?} {}",
+                    timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    vib as u8
+                );
+                buzz_duration = buzz_dev.buzz(vib as u8, cli.waveform)?;
 
                 last_timestamp = timestamp;
             }
