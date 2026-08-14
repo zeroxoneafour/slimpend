@@ -266,7 +266,7 @@ async fn main_loop(
 
                 let zero_vib = waveform.buzzless_intensity();
                 let vib_u8 = (vib * (255.0 - zero_vib as f64)).ceil() as u8 + zero_vib;
-                println!("{}", vib_u8);
+                //println!("{}", vib_u8);
                 buzz_duration = buzz_dev.buzz(vib_u8, waveform)?;
 
                 old_x = x;
