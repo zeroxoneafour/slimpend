@@ -199,9 +199,11 @@ async fn main_loop(
     let mut y = 0;
     let mut btn_touch = false;
     //let mut eraser = false;
-    let mut btn_touch_justpressed = false;
     let mut pressure = 0;
-    let mut last_timestamp = SystemTime::now();
+    // track buzz and velocity timestamp seperately
+    // so we can reset velocity timestamp whenever old_x/old_y reset
+    let mut buzz_timestamp = SystemTime::now();
+    let mut velocity_timestamp = SystemTime::now();
     let mut buzz_duration = Duration::from_millis(0);
 
     while let Ok(ev) = ev_stream.next_event().await {
@@ -218,14 +220,14 @@ async fn main_loop(
                 }
                 _ => {}
             },
-            EventSummary::Key(_, key, value) => match key {
+            EventSummary::Key(ev, key, value) => match key {
                 KeyCode::BTN_TOUCH => {
                     btn_touch = !(value == 0);
                     if btn_touch {
-                        btn_touch_justpressed = true;
                         // resync old_x and old_y on touch
                         old_x = x;
                         old_y = y;
+                        velocity_timestamp = ev.timestamp();
                     } else {
                         pressure = 0;
                     }
@@ -237,8 +239,9 @@ async fn main_loop(
             },
             EventSummary::Synchronization(sync, _, _) => {
                 let timestamp = sync.timestamp();
-                let delta_t = timestamp.duration_since(last_timestamp)?;
-                if delta_t < buzz_duration {
+                if let Ok(duration) = timestamp.duration_since(buzz_timestamp)
+                    && duration < buzz_duration
+                {
                     continue;
                 }
 
@@ -246,17 +249,19 @@ async fn main_loop(
                     continue;
                 }
 
-                let mut vib = if btn_touch_justpressed {
-                    btn_touch_justpressed = false;
-                    // small buzz on pen touch
-                    0.1
-                } else {
+                let mut vib = {
                     let delta_x = x - old_x;
                     let delta_y = y - old_y;
                     let delta_pos = ((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res;
+                    let Ok(delta_t) = timestamp.duration_since(velocity_timestamp) else {
+                        continue;
+                    };
                     // velocity is in display diagonals/s
-                    // divided by 10 to prevent super high values
-                    let velocity = delta_pos / (delta_t.as_millis() as f64 / 100.0);
+                    // divided by <arbitrary value> (here 20) to prevent super high values
+                    let velocity = delta_pos / (delta_t.as_millis() as f64 / 50.0);
+                    // update this up here so that returns due to 0 velocity
+                    // dont cause velocity to carry over into next frames
+                    velocity_timestamp = timestamp;
                     // if the pen basically is not moving, then don't send pressure signals
                     if velocity < 0.001 {
                         continue;
@@ -276,7 +281,7 @@ async fn main_loop(
 
                 old_x = x;
                 old_y = y;
-                last_timestamp = timestamp;
+                buzz_timestamp = timestamp;
             }
             _ => {}
         };
