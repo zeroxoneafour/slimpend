@@ -256,15 +256,17 @@ async fn main_loop(
                 let mut vib = {
                     let delta_x = x - old_x;
                     let delta_y = y - old_y;
-                    let delta_pos = ((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res;
+                    let delta_p = ((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res;
                     let Ok(delta_t) = timestamp.duration_since(velocity_timestamp) else {
                         continue;
                     };
                     // velocity is in display diagonals/s
                     // divided by <arbitrary value> (here 20) to prevent super high values
-                    let velocity = delta_pos / (delta_t.as_millis() as f64 / 50.0);
+                    let velocity = delta_p / (delta_t.as_micros() as f64 / 10.0f64.powi(6)) / 20.0;
                     // update this up here so that returns due to 0 velocity
                     // dont cause velocity to carry over into next frames
+                    old_x = x;
+                    old_y = y;
                     velocity_timestamp = timestamp;
                     // if the pen basically is not moving, then don't send pressure signals
                     if velocity < 0.005 {
@@ -283,8 +285,6 @@ async fn main_loop(
                 //println!("{}", vib_u8);
                 buzz_duration = buzz_dev.buzz(vib_u8, waveform)?;
 
-                old_x = x;
-                old_y = y;
                 buzz_timestamp = timestamp;
             }
             _ => {}
