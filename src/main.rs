@@ -267,7 +267,7 @@ async fn main_loop(
                     // dont cause velocity to carry over into next frames
                     velocity_timestamp = timestamp;
                     // if the pen basically is not moving, then don't send pressure signals
-                    if velocity < 0.001 {
+                    if velocity < 0.005 {
                         continue;
                     }
                     velocity.powf(cli.velocity_pow)
