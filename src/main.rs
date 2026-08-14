@@ -35,7 +35,7 @@ struct Cli {
         short,
         long,
         help = "Intensity multiplier",
-        default_value_t = 2.0,
+        default_value_t = 1.0,
         global = true
     )]
     intensity: f64,
@@ -48,13 +48,13 @@ struct Cli {
     )]
     pressure_pow: f64,
     #[arg(
-        short,
-        long = "distance",
-        help = "Nth power to apply to distance multiplier",
+        short = 'd',
+        long = "velocity",
+        help = "Nth power to apply to velocity multiplier",
         default_value_t = 1.0,
         global = true
     )]
-    distance_pow: f64,
+    velocity_pow: f64,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -237,9 +237,8 @@ async fn main_loop(
             },
             EventSummary::Synchronization(sync, _, _) => {
                 let timestamp = sync.timestamp();
-                if let Ok(duration) = timestamp.duration_since(last_timestamp)
-                    && duration < buzz_duration
-                {
+                let delta_t = timestamp.duration_since(last_timestamp)?;
+                if delta_t < buzz_duration {
                     continue;
                 }
 
@@ -254,10 +253,15 @@ async fn main_loop(
                 } else {
                     let delta_x = x - old_x;
                     let delta_y = y - old_y;
-                    // apply a sqrt transform after dividing dist by 1024, then renormalize to 256
-                    // this helps gain a bit of vib at lower velocities
-                    (((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res)
-                        .powf(cli.distance_pow)
+                    let delta_pos = ((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res;
+                    // velocity is in display diagonals/s
+                    // divided by 10 to prevent super high values
+                    let velocity = delta_pos / (delta_t.as_millis() as f64 / 100.0);
+                    // if the pen basically is not moving, then don't send pressure signals
+                    if velocity < 0.001 {
+                        continue;
+                    }
+                    velocity.powf(cli.velocity_pow)
                 };
 
                 vib *= (pressure as f64 / pressure_res).powf(cli.pressure_pow);
@@ -265,7 +269,8 @@ async fn main_loop(
                 vib *= cli.intensity;
 
                 let zero_vib = waveform.buzzless_intensity();
-                let vib_u8 = (vib * (255.0 - zero_vib as f64)).ceil() as u8 + zero_vib;
+                let vib_u8 =
+                    (vib.clamp(0.0, 1.0) * (255.0 - zero_vib as f64)).ceil() as u8 + zero_vib;
                 //println!("{}", vib_u8);
                 buzz_duration = buzz_dev.buzz(vib_u8, waveform)?;
 
