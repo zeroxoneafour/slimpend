@@ -6,14 +6,12 @@ use std::{
 use crate::{
     bluez::{find_slim_pen_bt, monitor_connected, monitor_disconnected},
     buzz::{BuzzDevice, BuzzError, Waveform},
-    evdev::open_evdev,
 };
-use ::evdev::{AbsoluteAxisCode, EventSummary, KeyCode};
 use clap::{Parser, Subcommand};
+use evdev::{AbsoluteAxisCode, EventSummary, KeyCode};
 
 mod bluez;
 mod buzz;
-mod evdev;
 
 #[derive(Parser)]
 struct Cli {
@@ -100,14 +98,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::Buzz) => {
             let dev = BuzzDevice::new(None)?;
             let res = tokio::select! { v = buzz(&dev, cli.waveform) => v, _ = tokio::signal::ctrl_c() => Ok(()) };
-            println!("Sending stop waveform");
-            dev.buzz(0, Waveform::Stop)?;
+            //println!("Sending stop waveform");
+            //dev.buzz(0, Waveform::Stop)?;
             res
         }
-        Some(Commands::Serve) => server(&cli).await,
-        None => {
-            println!("No command found, defaulting to server mode");
-            server(&cli).await
+        Some(Commands::Serve) | None => {
+            if let None = &cli.command {
+                println!("No command found, defaulting to serve");
+            }
+            tokio::select! { v = serve(&cli) => v, _ = tokio::signal::ctrl_c() => Ok(()) }
         }
     }
 }
@@ -120,7 +119,7 @@ async fn buzz(dev: &BuzzDevice, waveform_option: u8) -> Result<(), Box<dyn Error
     }
 }
 
-async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
+async fn serve(cli: &Cli) -> Result<(), Box<dyn Error>> {
     let Some(bt_device) = find_slim_pen_bt(&cli.pen_alias).await? else {
         println!("Please pair your slim pen 2 with bluetooth (or specify --pen-alias)!");
         return Ok(());
@@ -130,29 +129,12 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
             monitor_connected(&bt_device).await?;
         }
         let addr = bt_device.address().to_string().to_ascii_lowercase();
-        // sometimes takes many tries to connect
-        let mut conn_tries = 1;
-        let try_connect_res = loop {
-            let Ok(Some(ret)) = try_connect_hid(&addr) else {
-                if conn_tries > 5 {
-                    break None;
-                }
-                conn_tries += 1;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            };
-            break Some(ret);
-        };
-        let Some((buzz_dev, ev_dev)) = try_connect_res else {
-            println!("Failed to connect to Slim Pen 2 ({}) after 5 tries", addr);
-            println!("Waiting for 1 seconds");
-            tokio::time::sleep(Duration::from_secs(10)).await;
+        // if it doesnt connect the first time try again as it takes a second for hids to register
+        let Ok((buzz_dev, ev_dev)) = try_connect_hid(&addr) else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         };
-        println!(
-            "Slim Pen 2 ({}) connected! (Took {} tries)",
-            addr, conn_tries
-        );
+        println!("Slim Pen 2 ({}) connected!", addr);
         //buzz_dev.buzz_cont(255, Waveform::None)?;
         buzz_dev.buzz(255, Waveform::Error)?;
         if let Err(e) = tokio::select!(
@@ -170,19 +152,26 @@ async fn server(cli: &Cli) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn try_connect_hid(addr: &str) -> Result<Option<(BuzzDevice, ::evdev::Device)>, Box<dyn Error>> {
+fn try_connect_hid(addr: &str) -> Result<(BuzzDevice, evdev::Device), Box<dyn Error>> {
     let buzz_dev = BuzzDevice::new(Some(&addr))?;
-    let Some(ev_dev) = open_evdev() else {
-        println!("No evdev device found matching \"IPTS Virtual Stylus\"");
-        return Ok(None);
-    };
-    return Ok(Some((buzz_dev, ev_dev)));
+    let ev_dev = evdev::enumerate()
+        .find_map(|(_, d)| {
+            if let Some(dev_name) = d.name()
+                && dev_name.contains("IPTSD Virtual Stylus")
+            {
+                Some(d)
+            } else {
+                None
+            }
+        })
+        .ok_or("No evdev device found matching \"IPTS Virtual Stylus\"")?;
+    return Ok((buzz_dev, ev_dev));
 }
 
 async fn main_loop(
     cli: &Cli,
     buzz_dev: &BuzzDevice,
-    ev_dev: ::evdev::Device,
+    ev_dev: evdev::Device,
 ) -> Result<(), Box<dyn Error>> {
     let mut x_res = 0;
     let mut y_res = 0;

@@ -1,5 +1,5 @@
 use hex_literal::hex;
-use hidapi::{HidApi, HidDevice};
+use hidapi::{HidApi, HidDevice, HidError};
 use std::{collections::HashMap, error::Error, fmt, hash::Hash, time::Duration};
 
 #[derive(Debug)]
@@ -84,33 +84,7 @@ impl BuzzDevice {
         };
         let hid_device = dev_info.open_device(&api)?;
 
-        let mut waveforms_buf = [0u8; 512];
-        waveforms_buf[0] = 0x42;
-        let waveforms_len = hid_device.get_feature_report(&mut waveforms_buf)?;
-        let waveforms: Vec<u16> = waveforms_buf[4..waveforms_len + 1]
-            .chunks_exact(2)
-            .map(|chunk| u16::from_be_bytes(chunk.try_into().unwrap()))
-            .collect();
-        let (durations_nums, waveform_ids) = waveforms.split_at(waveforms.len() / 2);
-        let mut durations = HashMap::new();
-        let mut ordinals = HashMap::new();
-        // first num in array is guaranteed to be duration for click,
-        // and will also establish the base ordinal (in this case 3)
-        // so the ordinal for waveform_ids[1] is 4, etc.
-        // the ordinal is passed instead of the waveform id in calls to buzz
-        let ordinal_base = waveform_ids[0] as u8;
-        ordinals.insert(0x1001, 1);
-        ordinals.insert(0x1002, 2);
-        ordinals.insert(0x1003, ordinal_base);
-        durations.insert(0x1003, durations_nums[0]);
-        for i in 1..durations_nums.len() {
-            let wf_id = waveform_ids[i];
-            if wf_id < 0x1003 {
-                continue;
-            }
-            ordinals.insert(wf_id, i as u8 + ordinal_base);
-            durations.insert(wf_id, durations_nums[i]);
-        }
+        let (ordinals, durations) = get_hid_info(&hid_device)?;
 
         //initialize_device(&hid_device)?;
 
@@ -177,4 +151,37 @@ fn initialize_device(dev: &HidDevice) -> Result<(), Box<dyn Error>> {
         dev.write(&chars)?;
     }
     Ok(())
+}
+
+// ordinals (bytes we send to buzz), codes (defined by Microsoft spec), and durations are all misaligned
+// so we read the pen data to get them ourselves
+fn get_hid_info(hid_device: &HidDevice) -> Result<(HashMap<u16, u8>, HashMap<u16, u16>), HidError> {
+    let mut waveforms_buf = [0u8; 512];
+    waveforms_buf[0] = 0x42;
+    let waveforms_len = hid_device.get_feature_report(&mut waveforms_buf)?;
+    let waveforms: Vec<u16> = waveforms_buf[4..waveforms_len + 1]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes(chunk.try_into().unwrap()))
+        .collect();
+    let (durations_nums, waveform_ids) = waveforms.split_at(waveforms.len() / 2);
+    let mut durations = HashMap::new();
+    let mut ordinals = HashMap::new();
+    // first num in array is guaranteed to be duration for click,
+    // and will also establish the base ordinal (in this case 3)
+    // so the ordinal for waveform_ids[1] is 4, etc.
+    // the ordinal is passed instead of the waveform id in calls to buzz
+    let ordinal_base = waveform_ids[0] as u8;
+    ordinals.insert(0x1001, 1);
+    ordinals.insert(0x1002, 2);
+    ordinals.insert(0x1003, ordinal_base);
+    durations.insert(0x1003, durations_nums[0]);
+    for i in 1..durations_nums.len() {
+        let wf_id = waveform_ids[i];
+        if wf_id < 0x1003 {
+            continue;
+        }
+        ordinals.insert(wf_id, i as u8 + ordinal_base);
+        durations.insert(wf_id, durations_nums[i]);
+    }
+    return Ok((ordinals, durations));
 }
