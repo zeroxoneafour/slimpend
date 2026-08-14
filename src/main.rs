@@ -200,7 +200,7 @@ async fn main_loop(
     let mut x = 0;
     let mut y = 0;
     let mut btn_touch = false;
-    let mut eraser = false;
+    //let mut eraser = false;
     let mut btn_touch_justpressed = false;
     let mut pressure = 0;
     let mut last_timestamp = SystemTime::now();
@@ -228,10 +228,12 @@ async fn main_loop(
                         // resync old_x and old_y on touch
                         old_x = x;
                         old_y = y;
+                    } else {
+                        pressure = 0;
                     }
                 }
                 KeyCode::BTN_TOOL_RUBBER => {
-                    eraser = !(value == 0);
+                    //eraser = !(value == 0);
                 }
                 _ => {}
             },
@@ -260,11 +262,10 @@ async fn main_loop(
                         .powf(1.0 / cli.distance_root)
                 };
 
-                vib *= if eraser {
-                    0.4
-                } else {
-                    (pressure as f64 / pressure_res).powf(1.0 / cli.pressure_root)
-                };
+                if pressure == 0 {
+                    continue;
+                }
+                vib *= (pressure as f64 / pressure_res).powf(1.0 / cli.pressure_root);
 
                 vib *= cli.intensity;
 
