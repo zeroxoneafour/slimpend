@@ -53,7 +53,7 @@ struct Cli {
         short,
         long = "pressure",
         help = "Nth root to apply to pressure multiplier",
-        default_value_t = 1.0,
+        default_value_t = 2.0,
         global = true
     )]
     pressure_root: f64,
@@ -61,7 +61,7 @@ struct Cli {
         short,
         long = "distance",
         help = "Nth root to apply to distance multiplier",
-        default_value_t = 3.0,
+        default_value_t = 2.0,
         global = true
     )]
     distance_root: f64,
