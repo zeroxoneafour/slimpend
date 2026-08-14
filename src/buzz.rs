@@ -64,6 +64,20 @@ pub enum Waveform {
     Grow = 0x1015,
 }
 
+impl Waveform {
+    // found this data myself through trial and error
+    // returns the maximum intensity that does not produce a buzz
+    pub fn buzzless_intensity(&self) -> u8 {
+        match self {
+            Waveform::Click => 39,
+            Waveform::Press => 35,
+            Waveform::Release => 49,
+            Waveform::Hover => 55,
+            _ => 0,
+        }
+    }
+}
+
 pub struct BuzzDevice {
     hid_device: HidDevice,
     ordinals: HashMap<u16, u8>,

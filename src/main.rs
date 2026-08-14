@@ -27,7 +27,7 @@ struct Cli {
         short,
         long,
         help = "Waveform to use. Values can be integers 0-3 inclusive",
-        default_value_t = 0u8,
+        default_value_t = 3u8,
         global = true
     )]
     waveform: u8,
@@ -35,36 +35,26 @@ struct Cli {
         short,
         long,
         help = "Intensity multiplier",
-        default_value_t = 1.0,
+        default_value_t = 2.0,
         global = true
     )]
     intensity: f64,
-    /*
-    #[arg(
-        short,
-        long,
-        help = "Try to keep the pen connection alive (not working rn and causes lag)",
-        default_value_t = false,
-        global = true
-    )]
-    keep_alive: bool,
-    */
     #[arg(
         short,
         long = "pressure",
-        help = "Nth root to apply to pressure multiplier",
-        default_value_t = 2.0,
+        help = "Nth power to apply to pressure multiplier",
+        default_value_t = 1.0,
         global = true
     )]
-    pressure_root: f64,
+    pressure_pow: f64,
     #[arg(
         short,
         long = "distance",
-        help = "Nth root to apply to distance multiplier",
-        default_value_t = 2.0,
+        help = "Nth power to apply to distance multiplier",
+        default_value_t = 1.0,
         global = true
     )]
-    distance_root: f64,
+    distance_pow: f64,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -74,8 +64,8 @@ impl TryFrom<u8> for Waveform {
     fn try_from(value: u8) -> Result<Self, BuzzError> {
         match value {
             0 => Ok(Waveform::Click),
-            1 => Ok(Waveform::Release),
-            2 => Ok(Waveform::Press),
+            1 => Ok(Waveform::Press),
+            2 => Ok(Waveform::Release),
             3 => Ok(Waveform::Hover),
             _ => Err(BuzzError::InvalidWaveform),
         }
@@ -94,10 +84,14 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
 
+    // validate cli arguments before running a command
+    let _: Waveform = cli.waveform.try_into()?;
+
     match &cli.command {
         Some(Commands::Buzz) => {
             let dev = BuzzDevice::new(None)?;
-            let res = tokio::select! { v = buzz(&dev, cli.waveform) => v, _ = tokio::signal::ctrl_c() => Ok(()) };
+            let res =
+                tokio::select! { v = buzz(&dev, &cli) => v, _ = tokio::signal::ctrl_c() => Ok(()) };
             //println!("Sending stop waveform");
             //dev.buzz(0, Waveform::Stop)?;
             res
@@ -111,11 +105,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn buzz(dev: &BuzzDevice, waveform_option: u8) -> Result<(), Box<dyn Error>> {
-    let waveform: Waveform = waveform_option.try_into()?;
-    println!("buzzing on waveform 0x{:x}", waveform as u16);
+async fn buzz(dev: &BuzzDevice, cli: &Cli) -> Result<(), Box<dyn Error>> {
+    let waveform: Waveform = cli.waveform.try_into()?;
+    let intensity = (1.0 * cli.intensity) as u8;
+    println!(
+        "buzzing on waveform 0x{:x} with intensity {}",
+        waveform as u16, intensity
+    );
     loop {
-        tokio::time::sleep(dev.buzz(255, waveform)?).await;
+        tokio::time::sleep(dev.buzz(intensity, waveform)?).await;
     }
 }
 
@@ -136,16 +134,16 @@ async fn serve(cli: &Cli) -> Result<(), Box<dyn Error>> {
         };
         println!("Slim Pen 2 ({}) connected!", addr);
         //buzz_dev.buzz_cont(255, Waveform::None)?;
-        buzz_dev.buzz(255, Waveform::Error)?;
+        buzz_dev.buzz(255, Waveform::Success)?;
         if let Err(e) = tokio::select!(
             v = main_loop(&cli, &buzz_dev, ev_dev) => { v },
             v = monitor_disconnected(&bt_device) => { match v {
                 Ok(_) => Ok(()),
                 Err(e) => Err(Box::new(e).into())
-            } },
-            v = keep_device_alive(&buzz_dev, false) => { v }
+            } }
         ) {
             println!("Ran into error - {}, restarting loop", e);
+            tokio::time::sleep(Duration::from_secs(1)).await;
         } else {
             println!("Slim Pen 2 ({}) disconnected!", addr);
         }
@@ -245,31 +243,31 @@ async fn main_loop(
                     continue;
                 }
 
-                if !btn_touch {
+                if !btn_touch || pressure == 0 {
                     continue;
                 }
 
                 let mut vib = if btn_touch_justpressed {
                     btn_touch_justpressed = false;
                     // small buzz on pen touch
-                    0.5
+                    0.1
                 } else {
                     let delta_x = x - old_x;
                     let delta_y = y - old_y;
                     // apply a sqrt transform after dividing dist by 1024, then renormalize to 256
                     // this helps gain a bit of vib at lower velocities
                     (((delta_x.pow(2) + delta_y.pow(2)) as f64).sqrt() / display_res)
-                        .powf(1.0 / cli.distance_root)
+                        .powf(cli.distance_pow)
                 };
 
-                if pressure == 0 {
-                    continue;
-                }
-                vib *= (pressure as f64 / pressure_res).powf(1.0 / cli.pressure_root);
+                vib *= (pressure as f64 / pressure_res).powf(cli.pressure_pow);
 
                 vib *= cli.intensity;
 
-                buzz_duration = buzz_dev.buzz((vib * 256.0) as u8, waveform)?;
+                let zero_vib = waveform.buzzless_intensity();
+                let vib_u8 = (vib * (255.0 - zero_vib as f64)).ceil() as u8 + zero_vib;
+                println!("{}", vib_u8);
+                buzz_duration = buzz_dev.buzz(vib_u8, waveform)?;
 
                 old_x = x;
                 old_y = y;
@@ -279,15 +277,4 @@ async fn main_loop(
         };
     }
     Ok(())
-}
-
-// ping loop to keep the connection alive
-// does not work
-async fn keep_device_alive(buzz_dev: &BuzzDevice, keep_alive: bool) -> Result<(), Box<dyn Error>> {
-    loop {
-        if keep_alive {
-            buzz_dev.dump_feature_reports();
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
 }
