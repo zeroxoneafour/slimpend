@@ -198,7 +198,7 @@ async fn main_loop(
     let mut x = 0;
     let mut y = 0;
     let mut btn_touch = false;
-    //let mut eraser = false;
+    let mut eraser = false;
     let mut pressure = 0;
     // track buzz and velocity timestamp seperately
     // so we can reset velocity timestamp whenever old_x/old_y reset
@@ -227,13 +227,17 @@ async fn main_loop(
                         // resync old_x and old_y on touch
                         old_x = x;
                         old_y = y;
-                        velocity_timestamp = ev.timestamp();
+                        // eraser sends a ton of BTN_TOUCHes that cause velocity timestamp to update too fast,
+                        // resulting in a near-infinite reported velocity at time of contact
+                        if !eraser {
+                            velocity_timestamp = ev.timestamp();
+                        }
                     } else {
                         pressure = 0;
                     }
                 }
                 KeyCode::BTN_TOOL_RUBBER => {
-                    //eraser = !(value == 0);
+                    eraser = !(value == 0);
                 }
                 _ => {}
             },
