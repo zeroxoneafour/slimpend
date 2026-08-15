@@ -198,7 +198,7 @@ async fn main_loop(
     let mut x = 0;
     let mut y = 0;
     let mut btn_touch = false;
-    let mut eraser = false;
+    let mut btn_touch_justpressed = false;
     let mut pressure = 0;
     // track buzz and velocity timestamp seperately
     // so we can reset velocity timestamp whenever old_x/old_y reset
@@ -220,24 +220,10 @@ async fn main_loop(
                 }
                 _ => {}
             },
-            EventSummary::Key(ev, key, value) => match key {
+            EventSummary::Key(_ev, key, value) => match key {
                 KeyCode::BTN_TOUCH => {
                     btn_touch = !(value == 0);
-                    if btn_touch {
-                        // resync old_x and old_y on touch
-                        old_x = x;
-                        old_y = y;
-                        // eraser sends a ton of BTN_TOUCHes that cause velocity timestamp to update too fast,
-                        // resulting in a near-infinite reported velocity at time of contact
-                        if !eraser {
-                            velocity_timestamp = ev.timestamp();
-                        }
-                    } else {
-                        pressure = 0;
-                    }
-                }
-                KeyCode::BTN_TOOL_RUBBER => {
-                    eraser = !(value == 0);
+                    btn_touch_justpressed = true;
                 }
                 _ => {}
             },
@@ -250,6 +236,16 @@ async fn main_loop(
                 }
 
                 if !btn_touch || pressure == 0 {
+                    continue;
+                }
+
+                // tapping pen to screen should have no haptic response
+                // (that we generate at least)
+                if btn_touch_justpressed {
+                    btn_touch_justpressed = false;
+                    old_x = x;
+                    old_y = y;
+                    velocity_timestamp = timestamp;
                     continue;
                 }
 
