@@ -27,7 +27,7 @@ struct Cli {
         short,
         long,
         help = "Waveform to use. Values can be integers 0-3 inclusive",
-        default_value_t = 3u8,
+        default_value_t = 0u8,
         global = true
     )]
     waveform: u8,
@@ -55,6 +55,13 @@ struct Cli {
         global = true
     )]
     velocity_pow: f64,
+    #[arg(
+        long,
+        help = "Enable debug logging",
+        default_value_t = false,
+        global = true
+    )]
+    debug: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -236,6 +243,9 @@ async fn main_loop(
                 }
 
                 if !btn_touch || pressure == 0 {
+                    if cli.debug {
+                        println!("continuing as there is no pressure");
+                    }
                     continue;
                 }
 
@@ -265,7 +275,10 @@ async fn main_loop(
                     old_y = y;
                     velocity_timestamp = timestamp;
                     // if the pen basically is not moving, then don't send pressure signals
-                    if velocity < 0.005 {
+                    if velocity < 0.001 {
+                        if cli.debug {
+                            println!("velocity is low, skipping");
+                        }
                         continue;
                     }
                     velocity.powf(cli.velocity_pow)
@@ -278,7 +291,9 @@ async fn main_loop(
                 let zero_vib = waveform.buzzless_intensity();
                 let vib_u8 =
                     (vib.clamp(0.0, 1.0) * (255.0 - zero_vib as f64)).ceil() as u8 + zero_vib;
-                //println!("{}", vib_u8);
+                if cli.debug {
+                    println!("{}", vib_u8);
+                }
                 buzz_duration = buzz_dev.buzz(vib_u8, waveform)?;
 
                 buzz_timestamp = timestamp;
