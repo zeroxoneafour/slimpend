@@ -100,7 +100,7 @@ impl BuzzDevice {
 
         let (ordinals, durations) = get_hid_info(&hid_device)?;
 
-        //initialize_device(&hid_device)?;
+        initialize_device(&hid_device)?;
 
         Ok(BuzzDevice {
             hid_device,
@@ -132,7 +132,7 @@ impl BuzzDevice {
         let wf_u16 = waveform as u16;
         let ordinal = self.ordinals.get(&wf_u16).ok_or("Failed to get ordinal")?;
         self.hid_device
-            .send_feature_report(&[65, 0, intensity, *ordinal, 0xD0, 0x05])?;
+            .write(&[65, 1, intensity, *ordinal, 0, 0, 0])?;
         Ok(())
     }
 
@@ -150,7 +150,6 @@ impl BuzzDevice {
     }
 }
 
-#[allow(dead_code)]
 fn initialize_device(dev: &HidDevice) -> Result<(), Box<dyn Error>> {
     let mut chars = [0u8; 61];
     chars[0] = 42;
@@ -159,6 +158,9 @@ fn initialize_device(dev: &HidDevice) -> Result<(), Box<dyn Error>> {
         hex!("0100ffa0000000000000000000000000"),
         hex!("000011a08b9600050100000014054300"),
         hex!("000011a08b9600050100000004054300"),
+        hex!("000013a08b7500050100000004054300"),
+        hex!("000010a08b8e00050100000004034300"),
+        hex!("0200ffa0000000000000000000000000"),
     ];
     for write in hex_writes {
         chars[1..write.len() + 1].copy_from_slice(&write);
@@ -167,35 +169,55 @@ fn initialize_device(dev: &HidDevice) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// ordinals (bytes we send to buzz), codes (defined by Microsoft spec), and durations are all misaligned
-// so we read the pen data to get them ourselves
+// clauded
+// ordinals (bytes we send to buzz) and durations are read directly from
+// Report 66 rather than assumed, since the spec explicitly states ordinal
+// assignment is arbitrary per-device.
+//
+// Report 66 layout (confirmed against real hardware):
+//   byte[0]      = Report ID (66)
+//   byte[1..5]   = 32-bit constant (Usage 0x22) -- ignored
+//   byte[5..45]  = Duration List  -- 20 x u16 LE, ordinals 3..22
+//   byte[45..85] = Waveform List  -- 20 x u16 LE, ordinals 3..22
 fn get_hid_info(hid_device: &HidDevice) -> Result<(HashMap<u16, u8>, HashMap<u16, u16>), HidError> {
-    let mut waveforms_buf = [0u8; 512];
-    waveforms_buf[0] = 0x42;
-    let waveforms_len = hid_device.get_feature_report(&mut waveforms_buf)?;
-    let waveforms: Vec<u16> = waveforms_buf[4..waveforms_len + 1]
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes(chunk.try_into().unwrap()))
-        .collect();
-    let (durations_nums, waveform_ids) = waveforms.split_at(waveforms.len() / 2);
-    let mut durations = HashMap::new();
+    let mut buf = [0u8; 512];
+    buf[0] = 66;
+    let len = hid_device.get_feature_report(&mut buf)?;
+
+    // Bail out gracefully rather than panicking on a short/garbage read.
+    if len < 84 {
+        return Ok((
+            HashMap::from([(0x1001u16, 1u8), (0x1002u16, 2u8)]),
+            HashMap::new(),
+        ));
+    }
+
+    let durations_raw = &buf[5..45];
+    let waveforms_raw = &buf[45..85];
+
     let mut ordinals = HashMap::new();
-    // first num in array is guaranteed to be duration for click,
-    // and will also establish the base ordinal (in this case 3)
-    // so the ordinal for waveform_ids[1] is 4, etc.
-    // the ordinal is passed instead of the waveform id in calls to buzz
-    let ordinal_base = waveform_ids[0] as u8;
-    ordinals.insert(0x1001, 1);
-    ordinals.insert(0x1002, 2);
-    ordinals.insert(0x1003, ordinal_base);
-    durations.insert(0x1003, durations_nums[0]);
-    for i in 1..durations_nums.len() {
-        let wf_id = waveform_ids[i];
-        if wf_id < 0x1003 {
+    let mut durations = HashMap::new();
+
+    // None and Stop are fixed by spec, not present in the Waveform List.
+    ordinals.insert(0x1001u16, 1u8);
+    ordinals.insert(0x1002u16, 2u8);
+
+    for i in 0..20usize {
+        let ordinal = (i + 3) as u8;
+        let idx = i * 2;
+
+        let waveform_id = u16::from_le_bytes([waveforms_raw[idx], waveforms_raw[idx + 1]]);
+        let duration = u16::from_le_bytes([durations_raw[idx], durations_raw[idx + 1]]);
+
+        // 0x1001 (None) and anything below it marks an unpopulated/padding
+        // slot -- skip rather than record a bogus mapping.
+        if waveform_id < 0x1003 {
             continue;
         }
-        ordinals.insert(wf_id, i as u8 + ordinal_base);
-        durations.insert(wf_id, durations_nums[i]);
+
+        ordinals.insert(waveform_id, ordinal);
+        durations.insert(waveform_id, duration);
     }
-    return Ok((ordinals, durations));
+
+    Ok((ordinals, durations))
 }

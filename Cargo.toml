@@ -11,3 +11,4 @@ hex-literal = "1.1.0"
 hidapi = { version = "2.6.6", default-features = false, features = [ "linux-shared-hidraw" ] }
 tokio = { version = "1.53.1", features = [ "signal" ] }
 tokio-stream = "0.1.19"
+uuid = "1.26.1"

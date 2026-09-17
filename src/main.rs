@@ -12,6 +12,7 @@ use evdev::{AbsoluteAxisCode, EventSummary, KeyCode};
 
 mod bluez;
 mod buzz;
+mod pen;
 
 #[derive(Parser)]
 struct Cli {
